@@ -337,7 +337,7 @@ export default function PriceSummary({ cdata, days }) {
               fontWeight: 600
             }}
           >
-            / quintal
+            / kg
           </span>
         </div>
 
@@ -399,7 +399,7 @@ export default function PriceSummary({ cdata, days }) {
               fontWeight: 600
             }}
           >
-            / quintal
+            /kg
           </span>
         </div>
 

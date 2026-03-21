@@ -1,7 +1,7 @@
 """
 KrishiMind — ML Inference Engine
-Loads trained LSTM models and performs price forecasting
-Enhanced with realistic mandi market dynamics
+LSTM price forecasting for mandi crops
+Outputs prices in ₹/kg (model trained in ₹/quintal)
 """
 
 import os
@@ -13,7 +13,13 @@ from tensorflow import keras
 
 np.random.seed(42)
 
-# ───────────────── PATH CONFIG ─────────────────
+# ───────────────── CONFIG ─────────────────
+
+SEQ_LEN = 30
+FEATURES = 14
+PRICE_DIVISOR = 100  # convert quintal → kg
+
+CROPS = ["onion", "tomato", "potato", "rice", "wheat"]
 
 ML_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(ML_DIR)
@@ -21,44 +27,26 @@ ROOT_DIR = os.path.dirname(ML_DIR)
 MODELS_DIR = os.path.join(ROOT_DIR, "models")
 DATA_DIR = os.path.join(ROOT_DIR, "data", "processed")
 
-print(f"📁 ROOT_DIR  : {ROOT_DIR}")
-print(f"📁 MODELS_DIR: {MODELS_DIR}")
-print(f"📁 DATA_DIR  : {DATA_DIR}")
-print(f"📁 TensorFlow version: {tf.__version__}")
+print("TensorFlow:", tf.__version__)
 
-CROPS = ["onion", "tomato", "potato", "rice", "wheat"]
-
-SEQ_LEN = 30
-FEATURES = 14
-
-
-# ───────────────── COMPAT PATCH ─────────────────
+# ───────────────── MODEL COMPATIBILITY PATCH ─────────────────
 
 class CompatibleLSTM(keras.layers.LSTM):
     def __init__(self, *args, **kwargs):
         kwargs.pop("time_major", None)
         super().__init__(*args, **kwargs)
 
-    @classmethod
-    def from_config(cls, config):
-        config.pop("time_major", None)
-        return super().from_config(config)
-
-
 class CompatibleBidirectional(keras.layers.Bidirectional):
-
     @classmethod
     def from_config(cls, config):
         if "layer" in config and "config" in config["layer"]:
             config["layer"]["config"].pop("time_major", None)
         return super().from_config(config)
 
-
 CUSTOM_OBJECTS = {
     "LSTM": CompatibleLSTM,
     "Bidirectional": CompatibleBidirectional,
 }
-
 
 # ───────────────── LOAD MODELS ─────────────────
 
@@ -73,29 +61,22 @@ for crop in CROPS:
     scaler_y_path = os.path.join(MODELS_DIR, f"scaler_y_{crop}.pkl")
 
     if not os.path.exists(model_path):
-        print(f"❌ Missing model: {model_path}")
+        print("Missing model:", crop)
         continue
 
-    try:
-        MODELS[crop] = keras.models.load_model(
-            model_path,
-            custom_objects=CUSTOM_OBJECTS,
-            compile=False
-        )
+    MODELS[crop] = keras.models.load_model(
+        model_path,
+        custom_objects=CUSTOM_OBJECTS,
+        compile=False
+    )
 
-        with open(scaler_x_path, "rb") as f:
-            SCALER_X[crop] = pickle.load(f)
+    with open(scaler_x_path, "rb") as f:
+        SCALER_X[crop] = pickle.load(f)
 
-        with open(scaler_y_path, "rb") as f:
-            SCALER_Y[crop] = pickle.load(f)
+    with open(scaler_y_path, "rb") as f:
+        SCALER_Y[crop] = pickle.load(f)
 
-        print(f"✅ Loaded {crop} model")
-
-    except Exception as e:
-        print(f"❌ Failed loading {crop}: {e}")
-
-print(f"\n✅ Models loaded: {list(MODELS.keys())}\n")
-
+    print("Loaded:", crop)
 
 # ───────────────── SMOOTHING ─────────────────
 
@@ -107,66 +88,62 @@ def smooth_series(series):
         if i == 0:
             smoothed.append(series[i])
         else:
-            smoothed.append((0.7 * series[i]) + (0.3 * smoothed[i - 1]))
+            smoothed.append((0.7 * series[i]) + (0.3 * smoothed[i-1]))
 
     return np.array(smoothed)
 
+# ───────────────── MARKET DYNAMICS ─────────────────
 
-# ───────────────── REALISTIC MARKET DYNAMICS ─────────────────
-
-def add_market_dynamics(series, base_price):
+def add_market_dynamics(series, base):
 
     series = np.array(series)
 
-    # gradual drift
-    drift = np.linspace(0, base_price * 0.02, len(series))
+    drift = np.linspace(0, base * 0.02, len(series))
+    seasonal = np.sin(np.linspace(0, 2*np.pi, len(series))) * base * 0.01
+    noise = np.random.normal(0, base * 0.004, len(series))
 
-    # mandi seasonal pattern
-    seasonal = np.sin(np.linspace(0, 2 * np.pi, len(series))) * base_price * 0.01
+    return series + drift + seasonal + noise
 
-    # volatility
-    noise = np.random.normal(0, base_price * 0.004, len(series))
+# ───────────────── MOCK FORECAST ─────────────────
 
-    adjusted = series + drift + seasonal + noise
+def generate_mock_forecast(crop, days):
 
-    return adjusted
-
-
-# ───────────────── FORECAST FUNCTION ─────────────────
-
-def generate_mock_forecast(crop: str, forecast_days: int):
-    print(f"⚠️ Model for {crop} missing. Returning mock data.")
-    base_prices = {"onion": 2000.0, "tomato": 1500.0, "potato": 1800.0, "wheat": 2500.0, "rice": 3000.0}
-    base = base_prices.get(crop.lower(), 2000.0)
-    
-    dates = pd.date_range(start=pd.Timestamp.today(), periods=forecast_days).strftime("%Y-%m-%d").tolist()
-    
-    # Generate realistic-looking series
-    np.random.seed(hash(crop) % 10000)
-    drift = np.linspace(base, base * 1.05, forecast_days)
-    noise = np.random.normal(0, base * 0.02, forecast_days)
-    series = np.round(drift + noise, 2)
-    upper = np.round(series * 1.08, 2)
-    lower = np.round(series * 0.92, 2)
-    
-    trend_pct = ((series[-1] - base) / base) * 100
-    advice = "HOLD" if trend_pct > 5 else "SELL" if trend_pct < -5 else "WAIT"
-    
-    return {
-        "today_price": round(base, 2),
-        "predicted_price": float(series[-1]),
-        "confidence_score": 75,
-        "trend_percent": round(trend_pct, 2),
-        "peak_day": int(np.argmax(series) + 1),
-        "peak_price": float(np.max(series)),
-        "advice": advice,
-        "forecast_dates": dates,
-        "forecast_series": series.tolist(),
-        "upper_band": upper.tolist(),
-        "lower_band": lower.tolist(),
+    base_prices = {
+        "onion": 2000,
+        "tomato": 1500,
+        "potato": 1800,
+        "wheat": 2500,
+        "rice": 3000
     }
 
-def forecast_crop(crop: str, forecast_days: int = 14):
+    base = base_prices.get(crop, 2000)
+
+    drift = np.linspace(base, base*1.05, days)
+    noise = np.random.normal(0, base*0.02, days)
+
+    series = drift + noise
+
+    upper = series * 1.08
+    lower = series * 0.92
+
+    # convert to kg
+    series = series / PRICE_DIVISOR
+    upper = upper / PRICE_DIVISOR
+    lower = lower / PRICE_DIVISOR
+    base = base / PRICE_DIVISOR
+
+    return {
+        "today_price": round(base,2),
+        "predicted_price": round(series[-1],2),
+        "confidence_score":75,
+        "forecast_series": np.round(series,2).tolist(),
+        "upper_band": np.round(upper,2).tolist(),
+        "lower_band": np.round(lower,2).tolist(),
+    }
+
+# ───────────────── MAIN FORECAST ─────────────────
+
+def forecast_crop(crop, forecast_days=14):
 
     if crop not in MODELS:
         return generate_mock_forecast(crop, forecast_days)
@@ -175,113 +152,71 @@ def forecast_crop(crop: str, forecast_days: int = 14):
     scaler_X = SCALER_X[crop]
     scaler_Y = SCALER_Y[crop]
 
-    features_file = os.path.join(DATA_DIR, f"features_{crop}.csv")
-
-    df = pd.read_csv(features_file)
+    file = os.path.join(DATA_DIR, f"features_{crop}.csv")
+    df = pd.read_csv(file)
 
     feature_cols = [
-        "price_lag_1",
-        "price_lag_3",
-        "price_lag_7",
-        "price_lag_14",
-        "price_lag_30",
-        "price_lag_60",
-        "rolling_mean_7",
-        "rolling_mean_14",
-        "rolling_std_7",
-        "arrivals_mt",
-        "weekly_arrival_change",
-        "day_of_week",
-        "month",
-        "quarter",
+        "price_lag_1","price_lag_3","price_lag_7","price_lag_14","price_lag_30",
+        "price_lag_60","rolling_mean_7","rolling_mean_14","rolling_std_7",
+        "arrivals_mt","weekly_arrival_change","day_of_week","month","quarter"
     ]
 
     sequence = df[feature_cols].tail(SEQ_LEN).values
     sequence = scaler_X.transform(sequence)
 
-    predictions = []
+    preds = []
 
     for _ in range(forecast_days):
 
-        seq_input = sequence.reshape(1, SEQ_LEN, FEATURES)
-
-        pred = model.predict(seq_input, verbose=0)
+        X = sequence.reshape(1,SEQ_LEN,FEATURES)
+        pred = model.predict(X,verbose=0)
 
         price = scaler_Y.inverse_transform(pred)[0][0]
-
-        predictions.append(float(price))
+        preds.append(price)
 
         next_row = sequence[-1]
-
         sequence = np.vstack([sequence[1:], next_row])
 
-    predictions = np.array(predictions)
+    preds = smooth_series(preds)
+    preds = add_market_dynamics(preds, preds[0])
 
-    predictions = smooth_series(predictions)
+    preds = np.array(preds)
 
-    predictions = add_market_dynamics(predictions, predictions[0])
+    today_price_q = float(df["modal_price"].iloc[-1])
+    predicted_q = float(preds[-1])
 
-    window = 3
-    smoothed = []
+    std = np.std(preds)
+    time_scale = np.linspace(1.0,1.5,len(preds))
 
-    for i in range(len(predictions)):
-        start = max(0, i - window + 1)
-        smoothed.append(np.mean(predictions[start:i + 1]))
+    upper_q = preds + (1.96*std*time_scale)
+    lower_q = preds - (1.96*std*time_scale)
 
-    predictions = np.array(smoothed)
+    # convert to kg
+    today_price = today_price_q / PRICE_DIVISOR
+    predicted_price = predicted_q / PRICE_DIVISOR
+    preds = preds / PRICE_DIVISOR
+    upper = upper_q / PRICE_DIVISOR
+    lower = lower_q / PRICE_DIVISOR
 
-    today_price = float(df["modal_price"].iloc[-1])
-
-    predicted_price = float(predictions[-1])
-
-    trend_percent = ((predicted_price - today_price) / today_price) * 100
-
-    peak_day = int(np.argmax(predictions) + 1)
-
-    peak_price = float(np.max(predictions))
-
-    std = np.std(predictions)
-
-    time_scale = np.linspace(1.0, 1.5, len(predictions))
-
-    upper_band = predictions + (1.96 * std * time_scale)
-
-    lower_band = predictions - (1.96 * std * time_scale)
-
-    predictions = np.round(predictions, 2)
-
-    upper_band = np.round(upper_band, 2)
-
-    lower_band = np.round(lower_band, 2)
+    trend = ((predicted_price - today_price)/today_price)*100
 
     forecast_dates = pd.date_range(
         start=pd.Timestamp.today(),
         periods=forecast_days
     ).strftime("%Y-%m-%d").tolist()
 
-    if trend_percent > 8:
-        advice = "HOLD"
-    elif trend_percent < -5:
-        advice = "SELL"
-    else:
-        advice = "WAIT"
-
     return {
-        "today_price": round(today_price, 2),
-        "predicted_price": round(predicted_price, 2),
+        "today_price": round(today_price,2),
+        "predicted_price": round(predicted_price,2),
+        "trend_percent": round(trend,2),
         "confidence_score": 96,
-        "trend_percent": round(trend_percent, 2),
-        "peak_day": peak_day,
-        "peak_price": round(peak_price, 2),
-        "advice": advice,
         "forecast_dates": forecast_dates,
-        "forecast_series": predictions.tolist(),
-        "upper_band": upper_band.tolist(),
-        "lower_band": lower_band.tolist(),
+        "forecast_series": np.round(preds,2).tolist(),
+        "upper_band": np.round(upper,2).tolist(),
+        "lower_band": np.round(lower,2).tolist(),
     }
 
-
-# ───────────────── MULTI-CROP FORECAST ─────────────────
+# ───────────────── MULTI CROP ─────────────────
 
 def predict_all_crops(days=14):
 
@@ -290,9 +225,9 @@ def predict_all_crops(days=14):
     for crop in CROPS:
 
         try:
-            results[crop] = forecast_crop(crop, days)
+            results[crop] = forecast_crop(crop,days)
 
         except Exception as e:
-            results[crop] = {"error": str(e)}
+            results[crop] = {"error":str(e)}
 
     return results
