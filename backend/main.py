@@ -6,7 +6,7 @@ Must be run from inside the /backend folder
 
 import sys
 import os
-
+from routers import chat
 # ── Ensure ROOT is in path ────────────────────────────────────────────────────
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))   # .../krishimind/backend
 ROOT_DIR    = os.path.dirname(BACKEND_DIR)                  # .../krishimind
@@ -76,3 +76,4 @@ def health():
         "models_loaded": list(MODELS.keys()),
         "total_models":  len(MODELS),
     }
+app.include_router(chat.router, tags=["Chat"]) 
